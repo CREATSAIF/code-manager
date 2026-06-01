@@ -194,6 +194,139 @@ def cmd_fetch(args):
     else:
         print(f"⚠️  Fetch incomplete: {err}")
 
+# Conventional-commit type → human section label
+_CHANGELOG_SECTIONS = [
+    ("feat",     "Features"),
+    ("fix",      "Bug Fixes"),
+    ("perf",     "Performance"),
+    ("refactor", "Refactoring"),
+    ("docs",     "Documentation"),
+    ("test",     "Tests"),
+    ("ci",       "CI / Build"),
+    ("chore",    "Chores"),
+    ("style",    "Style"),
+    ("build",    "Build System"),
+]
+
+def _classify_commit(subject: str) -> tuple[str, str]:
+    """Return (section_key, cleaned_subject) for a commit subject line.
+    Falls back to ('other', subject) for non-conventional messages.
+    """
+    for key, _ in _CHANGELOG_SECTIONS:
+        prefix = f"{key}:"
+        if subject.lower().startswith(prefix):
+            return key, subject[len(prefix):].strip() or subject
+        prefix_bang = f"{key}!"
+        if subject.lower().startswith(prefix_bang):
+            return key, ("**BREAKING:** " + subject[len(prefix_bang):].strip()).strip()
+    if "BREAKING CHANGE" in subject.upper() or "BREAKING:" in subject.upper():
+        return "feat", ("**BREAKING:** " + subject).strip()
+    return "other", subject
+
+def cmd_changelog(args):
+    """Generate (or print) a CHANGELOG.md from git history, grouped by tag.
+
+    When --write is given, writes the result to CHANGELOG.md in the repo.
+    Otherwise prints to stdout.
+    """
+    repo = args.path
+    # %B = full body; %H = hash; %s = subject
+    rc, out, err = run_git("log", "--tags", "--simplify-by-decoration",
+                           "--pretty=format:%H|%d|%s", cwd=repo)
+    if rc != 0:
+        print(f"❌ git log failed: {err}")
+        return
+
+    rc, out2, err2 = run_git("log", "--pretty=format:%H|%s|%b", cwd=repo)
+    if rc != 0:
+        print(f"❌ git log failed: {err2}")
+        return
+
+    # Build tag → (hash, name) map from the decorated log
+    tag_map = {}     # hash -> tag name (latest wins)
+    tag_order = []   # ordered list of (hash, tag) newest-first
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        hash_part, _, rest = line.partition("|")
+        deco = ""
+        subj = rest
+        if "|" in rest:
+            deco, _, subj = rest.partition("|")
+        tag_name = ""
+        if "tag:" in deco:
+            tag_name = deco.split("tag:", 1)[1].split(")")[0].strip()
+        if tag_name and hash_part not in tag_map:
+            tag_map[hash_part] = tag_name
+            tag_order.append((hash_part, tag_name))
+
+    # Build sections: list of (header, [(subject, hash)]) newest first
+    # Iterate commits; group by the most recent preceding tag.
+    sections = []  # list of (header, [items])
+    current_header = "Unreleased"
+    current_items = []
+    seen_in_section = set()
+
+    for line in out2.splitlines():
+        if not line.strip():
+            continue
+        parts = line.split("|", 2)
+        if len(parts) < 2:
+            continue
+        commit_hash = parts[0]
+        subject = parts[1] if len(parts) >= 2 else ""
+        # body = parts[2] if len(parts) > 2 else ""
+
+        if commit_hash in tag_map and current_items:
+            sections.append((current_header, current_items))
+            current_header = tag_map[commit_hash]
+            current_items = []
+            seen_in_section = set()
+        elif commit_hash in tag_map:
+            current_header = tag_map[commit_hash]
+
+        # Dedupe within a section (decorated + full logs both list tag commits)
+        dedupe_key = (current_header, subject)
+        if dedupe_key in seen_in_section:
+            continue
+        seen_in_section.add(dedupe_key)
+
+        section_key, cleaned = _classify_commit(subject)
+        current_items.append((section_key, cleaned, commit_hash[:7]))
+
+    if current_items:
+        sections.append((current_header, current_items))
+
+    # Render
+    lines = ["# Changelog", "", "All notable changes are documented here.", ""]
+    for header, items in sections:
+        lines.append(f"## {header}")
+        lines.append("")
+        # Group by section_key, keep original order within each group
+        groups = {}
+        order = []
+        for section_key, subj, short_hash in items:
+            if section_key not in groups:
+                groups[section_key] = []
+                order.append(section_key)
+            groups[section_key].append((subj, short_hash))
+        for key in order:
+            label = dict(_CHANGELOG_SECTIONS).get(key, "Other")
+            lines.append(f"### {label}")
+            lines.append("")
+            for subj, short_hash in groups[key]:
+                lines.append(f"- {subj} ({short_hash})")
+            lines.append("")
+
+    body = "\n".join(lines).rstrip() + "\n"
+
+    if getattr(args, "write", False):
+        out_path = Path(repo) / "CHANGELOG.md"
+        out_path.write_text(body)
+        print(f"✅ Wrote {out_path} ({len(sections)} sections)")
+    else:
+        print(body)
+
 def build_parser():
     parser = argparse.ArgumentParser(description="Code Manager - Git workflow automation")
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
@@ -249,6 +382,10 @@ def build_parser():
     p_fetch = subparsers.add_parser("fetch", help="Fetch from remote")
     p_fetch.add_argument("path", default=".")
 
+    p_changelog = subparsers.add_parser("changelog", help="Generate CHANGELOG.md from git history")
+    p_changelog.add_argument("--write", action="store_true", help="Write to CHANGELOG.md in the repo")
+    p_changelog.add_argument("path", default=".")
+
     return parser
 
 def main():
@@ -279,6 +416,7 @@ def main():
         "worktree": cmd_worktree,
         "remote": cmd_remote,
         "fetch": cmd_fetch,
+        "changelog": cmd_changelog,
     }
 
     handler = handlers.get(args.command)
