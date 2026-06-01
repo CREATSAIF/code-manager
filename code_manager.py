@@ -98,7 +98,6 @@ def cmd_branch(args):
     """List, create, or delete branches"""
     if args.subcmd == "list":
         rc, out, _ = run_git("branch", "-a", cwd=args.path)
-        current = run_git("rev-parse", "--abbrev-ref", "HEAD", cwd=args.path)[1].strip()
         print(f"Branches in {args.path}:")
         for line in out.strip().split("\n"):
             line = line.strip()
@@ -128,7 +127,7 @@ def cmd_commit(args):
 def cmd_log(args):
     """Show commit history"""
     count = args.n or 10
-    rc, out, _ = run_git("log", f"--oneline", "-n", str(count), cwd=args.path)
+    rc, out, _ = run_git("log", "--oneline", "-n", str(count), cwd=args.path)
     print(out or "No commits yet")
 
 def cmd_diff(args):
