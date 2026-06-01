@@ -4,13 +4,9 @@ Code Manager - Git workflow automation tool
 Features: repo management, branching, commits, PRs, code review, releases
 """
 
-import os
-import sys
 import subprocess
 import argparse
 from pathlib import Path
-from datetime import datetime
-from typing import Optional
 
 HERMES_HOME = Path.home() / ".hermes"
 CONFIG_DIR = HERMES_HOME / "code-manager"
