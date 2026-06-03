@@ -1,0 +1,182 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build sdist + wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history is needed so the changelog subcommand can
+          # resolve the tag a release commit was tagged at.
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install build tooling
+        run: |
+          python -m pip install --upgrade pip
+          pip install build
+
+      - name: Build sdist + wheel
+        run: |
+          mkdir -p dist
+          python -m build --sdist --wheel --outdir dist/
+
+      - name: List artifacts
+        run: ls -la dist/
+
+      - name: Compute checksums
+        shell: bash
+        run: |
+          cd dist
+          for f in *.tar.gz *.whl; do
+            [ -f "$f" ] || continue
+            sha256sum "$f" > "$f.sha256"
+          done
+          ls -la
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-manager-dist
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 30
+
+  generate-release-notes:
+    name: Generate release notes
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Generate CHANGELOG section for this tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 code_manager.py changelog . > /tmp/full_changelog.md
+          # Extract the section that starts with "## ${TAG}" and ends
+          # at the next "## " or EOF. Print it (without the leading
+          # header) for use as the release body.
+          awk -v tag="${GITHUB_REF_NAME}" '
+            BEGIN { capture=0 }
+            /^## / {
+              if (capture) { exit }
+              if ($0 == "## " tag) { capture=1; next }
+            }
+            capture { print }
+          ' /tmp/full_changelog.md > /tmp/release_notes.md
+          if [ ! -s /tmp/release_notes.md ]; then
+            # No dedicated section in CHANGELOG.md for this tag (typical
+            # for the very first release: the "Unreleased" section is
+            # the only one, and the tag will rename it retroactively).
+            # Fall back to the full file minus the top header.
+            awk '
+              /^# / { if (seen_h1) next; seen_h1=1; next }
+              { print }
+            ' /tmp/full_changelog.md > /tmp/release_notes.md
+          fi
+          echo "---release notes---"
+          cat /tmp/release_notes.md
+
+      - name: Write release notes to artifact
+        shell: bash
+        run: |
+          mkdir -p notes
+          cp /tmp/release_notes.md notes/RELEASE_NOTES.md
+          ls -la notes/
+
+      - name: Upload release notes
+        uses: actions/upload-artifact@v4
+        with:
+          name: code-manager-release-notes
+          path: notes/RELEASE_NOTES.md
+          retention-days: 30
+
+  github-release:
+    name: GitHub Release
+    needs: [build, generate-release-notes]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: code-manager-dist
+          path: dist
+
+      - name: Download release notes
+        uses: actions/download-artifact@v4
+        with:
+          name: code-manager-release-notes
+          path: notes
+
+      - name: List artifacts
+        run: |
+          echo "=== dist/ ==="
+          ls -la dist/
+          echo "=== notes/ ==="
+          ls -la notes/
+
+      - name: Resolve release body
+        id: body
+        shell: bash
+        run: |
+          if [ -s notes/RELEASE_NOTES.md ]; then
+            {
+              echo 'body<<EOF'
+              cat notes/RELEASE_NOTES.md
+              echo 'EOF'
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "body=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "name=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "name=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Resolved tag: $(cat <<<"$GITHUB_OUTPUT" | grep name= | head -1)"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: ${{ steps.tag.outputs.name }}
+          body: ${{ steps.body.outputs.body }}
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          files: |
+            dist/*.tar.gz
+            dist/*.whl
+            dist/*.sha256
