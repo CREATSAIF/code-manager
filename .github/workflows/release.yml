@@ -180,3 +180,56 @@ jobs:
             dist/*.tar.gz
             dist/*.whl
             dist/*.sha256
+
+  # ----------------------------------------------------------------------
+  # PyPI publication via Trusted Publishing (OIDC).
+  #
+  # Configure once on PyPI: project "code-manager" → Publishing → add a
+  # pending publisher with owner=CREATSAIF, repo=code-manager,
+  # workflow_filename=release.yml, environment_name=pypi. No API token
+  # is stored as a GitHub secret.
+  #
+  # Why not upload to Test PyPI first? v0.2.0 is still pre-1.0 and
+  # follows SemVer; once a release is shipped we want PyPI to reflect
+  # the exact artifacts GitHub Releases distributes. Test PyPI would
+  # just double the CI minutes without changing the production outcome.
+  # ----------------------------------------------------------------------
+  pypi-publish:
+    name: Publish to PyPI
+    needs: [build, github-release]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/code-manager
+    permissions:
+      id-token: write  # required for PyPI Trusted Publishing (OIDC)
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: code-manager-dist
+          path: dist
+
+      - name: Verify artifact checksums
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd dist
+          for f in *.tar.gz *.whl; do
+            [ -f "$f" ] || continue
+            expected=$(awk '{print $1}' "$f.sha256")
+            actual=$(sha256sum "$f" | awk '{print $1}')
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::sha256 mismatch for $f (expected $expected, got $actual)"
+              exit 1
+            fi
+            echo "✓ $f sha256 OK"
+          done
+
+      - name: Publish to PyPI via Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # No PYPI_API_TOKEN — OIDC handles auth via the pypa action.
+          # packages-dir defaults to dist/, which matches our build output.
+          skip-existing: true

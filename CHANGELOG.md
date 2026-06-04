@@ -2,6 +2,14 @@
 
 All notable changes are documented here.
 
+## v0.2.0
+
+### CI / Build
+
+- add PyPI Trusted Publishing (OIDC) job to release workflow
+- verify artifact sha256 checksums before publishing
+- enrich `pyproject.toml` with license, authors, classifiers, project URLs, and long description
+
 ## Unreleased
 
 ### Chores
