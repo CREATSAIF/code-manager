@@ -80,14 +80,23 @@ jobs:
         run: |
           set -euo pipefail
           python3 code_manager.py changelog . > /tmp/full_changelog.md
-          # Extract the section that starts with "## ${TAG}" and ends
-          # at the next "## " or EOF. Print it (without the leading
-          # header) for use as the release body.
-          awk -v tag="${GITHUB_REF_NAME}" '
-            BEGIN { capture=0 }
+          # Extract the section that matches the tag and ends at the next
+          # "## " or EOF. Print it (without the leading header) for use as
+          # the release body.
+          #
+          # Accepts both formats:
+          #   ## vX.Y.Z              (code-manager's own conventional-commit format)
+          #   ## [X.Y.Z]             (Keep-a-Changelog, no date)
+          #   ## [X.Y.Z] - DATE      (Keep-a-Changelog, with date)
+          # The "v" prefix on the tag is stripped for matching; the
+          # surrounding brackets and date are optional.
+          tag="${GITHUB_REF_NAME}"
+          bare="${tag#v}"
+          awk -v tag="$tag" -v bare="$bare" '
+            BEGIN { capture=0; pat="^##[ ]+v?\\[?" bare "\\]?( - .+)?$" }
             /^## / {
               if (capture) { exit }
-              if ($0 == "## " tag) { capture=1; next }
+              if ($0 ~ pat) { capture=1; next }
             }
             capture { print }
           ' /tmp/full_changelog.md > /tmp/release_notes.md
